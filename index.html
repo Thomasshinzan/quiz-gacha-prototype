@@ -251,7 +251,6 @@
 
     <script type="module">
         // UI要素の取得
-        // const userIdDisplay = document.getElementById('userIdDisplay'); // userIdDisplayは削除またはコメントアウト
         const questionText = document.getElementById('question-text');
         const answersContainer = document.getElementById('answers-container');
         const quizMessage = document.getElementById('quiz-message');
@@ -269,8 +268,9 @@
         let points = 0;
         let collectedIllustrations = new Set(); // 既に取得したイラストのIDを保持
         let currentQuizIndex = 0;
-        let quizzes = []; // クイズの順番を保持する配列
-        let illustrations = []; // ロードされたイラストデータを保持する配列
+        let masterQuizzes = []; // CSVから読み込んだ元のクイズリスト（順番は変わらない）
+        let activeQuizzes = []; // ゲーム中にシャッフルされて使用されるクイズの順番のリスト
+        let illustrations = []; // JSONから読み込んだ元のイラストデータリスト
 
         // ローカルストレージのキー
         const LOCAL_STORAGE_KEY = 'quizGachaGameData';
@@ -333,7 +333,6 @@
             }
         }
 
-
         /**
          * ゲームの状態を初期化またはロードする (localStorageから)
          */
@@ -345,11 +344,26 @@
                     points = data.points || 0;
                     collectedIllustrations = new Set(data.collectedIllustrations || []);
                     currentQuizIndex = data.currentQuizIndex || 0;
-                    quizzes = data.quizzesOrder ? data.quizzesOrder.map(index => quizzes[index]) : shuffleArray([...quizzes]); // 保存された順序を復元
+                    
+                    // クイズの順序をmasterQuizzesから復元
+                    if (data.quizzesOrder && masterQuizzes.length > 0) {
+                        activeQuizzes = data.quizzesOrder
+                            .map(index => masterQuizzes[index])
+                            .filter(q => q !== undefined); // データが存在しないインデックスを除外
+                        // 全てのクイズが削除された場合などに備えて、もし復元した配列が空ならシャッフルし直す
+                        if (activeQuizzes.length === 0 && masterQuizzes.length > 0) {
+                             activeQuizzes = shuffleArray([...masterQuizzes]);
+                        }
+                    } else {
+                        // 保存データにクイズ順序がない場合や、masterQuizzesが空の場合は新規シャッフル
+                        activeQuizzes = shuffleArray([...masterQuizzes]);
+                    }
+
                     console.log("Game state loaded from localStorage.");
                 } catch (e) {
                     console.error("Error parsing saved game data from localStorage:", e);
-                    initializeGameData(); // パースエラーの場合は新規初期化
+                    localStorage.removeItem(LOCAL_STORAGE_KEY); // パースエラーの場合はlocalStorageをクリア
+                    initializeGameData(); // 新規初期化
                 }
             } else {
                 console.log("No game state found, initializing new game.");
@@ -366,8 +380,8 @@
             points = 0;
             collectedIllustrations = new Set();
             currentQuizIndex = 0; // 新しいゲーム開始時は最初のクイズから
-            quizzes = shuffleArray([...quizzes]); // ロード済みのクイズをシャッフル
-            illustrations = shuffleArray([...illustrations]); // ロード済みのイラストをシャッフル
+            activeQuizzes = shuffleArray([...masterQuizzes]); // masterQuizzesからシャッフルして初期化
+            // illustrationsはシャッフルしない（コレクションは元のリスト順）
             
             saveGameState(); // 初期状態を保存
             console.log("Game data initialized.");
@@ -377,8 +391,8 @@
          * ゲームの状態をlocalStorageに保存する
          */
         function saveGameState() {
-            // クイズの順序を保存するために、元のallQuizzesに対するインデックスを保存する
-            const quizzesOrder = quizzes.map(quiz => allQuizzes.indexOf(quiz));
+            // 現在のactiveQuizzesの順序をmasterQuizzesに対するインデックスで保存
+            const quizzesOrder = activeQuizzes.map(quiz => masterQuizzes.indexOf(quiz));
 
             const gameState = {
                 points: points,
@@ -405,16 +419,16 @@
         }
 
         /**
-         * ゲームを開始し、最初のクイズを表示する
+         * ゲームを開始し、データをロードして表示する
          */
         async function startGame() {
-            // クイズとイラストデータがロードされるのを待つ
-            quizzes = await loadQuizzes();
+            // まずクイズとイラストのマスターデータをロード
+            masterQuizzes = await loadQuizzes();
             illustrations = await loadIllustrations();
 
-            if (quizzes.length === 0 || illustrations.length === 0) {
+            if (masterQuizzes.length === 0 || illustrations.length === 0) {
                 let errorMessage = "ゲームの準備ができませんでした。";
-                if (quizzes.length === 0) errorMessage += " (クイズデータが見つかりません)";
+                if (masterQuizzes.length === 0) errorMessage += " (クイズデータが見つかりません)";
                 if (illustrations.length === 0) errorMessage += " (イラストデータが見つかりません)";
                 questionText.textContent = errorMessage;
                 disableQuizButtons();
@@ -422,38 +436,42 @@
                 return;
             }
 
-            // ゲームの状態をロード (quizzesとillustrationsがロードされた後に実行)
+            // ゲームの状態をロード (masterQuizzesとillustrationsがロードされた後に実行)
             loadGameState(); 
-
-            // totalIllustrationsDisplay.textContent は updateUI() で設定される
             
-            // クイズ配列が空の場合、または全クイズを完了している場合にシャッフル
-            if (currentQuizIndex >= quizzes.length) {
+            // ロード後、現在のクイズインデックスがアクティブクイズの長さを超えている場合（全クイズクリア後など）はシャッフルし直す
+            if (currentQuizIndex >= activeQuizzes.length) {
                 currentQuizIndex = 0;
-                quizzes = shuffleArray([...quizzes]); // 全てのクイズを完了したらシャッフルし直す
+                activeQuizzes = shuffleArray([...masterQuizzes]); // 全てのクイズを完了したらシャッフルし直す
+                saveGameState(); // 新しいクイズ順序を保存
             }
             
-            displayQuiz();
-            updateUI();
+            displayQuiz(); // クイズを表示
+            updateUI(); // UIを更新
         }
 
         /**
          * クイズを表示する
          */
         function displayQuiz() {
-            if (quizzes.length === 0) {
+            if (activeQuizzes.length === 0) {
                  questionText.textContent = "クイズデータをロードできませんでした。";
                  return;
             }
 
             // 現在のクイズインデックスが配列の長さを超えている場合は、シャッフルして最初に戻る
-            if (currentQuizIndex >= quizzes.length) {
+            if (currentQuizIndex >= activeQuizzes.length) {
                 currentQuizIndex = 0;
-                quizzes = shuffleArray([...quizzes]); // 全てのクイズを完了したらシャッフルし直す
+                activeQuizzes = shuffleArray([...masterQuizzes]); // 全てのクイズを完了したらシャッフルし直す
                 saveGameState(); // 新しいクイズ順序を保存
             }
 
-            const currentQuiz = quizzes[currentQuizIndex];
+            const currentQuiz = activeQuizzes[currentQuizIndex];
+            if (!currentQuiz) { // クイズオブジェクトがundefinedの場合のガード
+                 questionText.textContent = "次のクイズが見つかりません。ゲームをリセットしてみてください。";
+                 disableQuizButtons();
+                 return;
+            }
             questionText.textContent = currentQuiz.question;
             answersContainer.innerHTML = ''; // 回答ボタンをクリア
 
@@ -613,7 +631,7 @@
                 gameClearMessage.classList.add('hidden');
                 // ゲームクリア状態でない場合のみ、クイズボタンを再度有効にする
                 if (answersContainer.children.length > 0 && answersContainer.children[0].disabled && (quizMessage.textContent.includes('正解') || quizMessage.textContent.includes('残念'))) {
-                     if (quizzes.length > 0) { 
+                     if (activeQuizzes.length > 0) { // activeQuizzesがロードされていることを確認
                         enableQuizButtons(); 
                      }
                 }
